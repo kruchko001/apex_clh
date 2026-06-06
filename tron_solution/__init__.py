@@ -1,0 +1,3 @@
+"""Tron Solution - RL Agent for Bittensor Subnet 1."""
+
+__version__ = "1.0.0"
