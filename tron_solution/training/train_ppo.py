@@ -63,6 +63,8 @@ def train(
     save_dir: str = "./ppo_tron_checkpoints",
     eval_freq: int = 10000,
     n_eval_episodes: int = 5,
+    opponent_type: str = "heuristic",
+    n_envs: int = None,
 ):
     """
     Train PPO agent on Tron environment.
@@ -90,14 +92,15 @@ def train(
     print(f"Using device: {device}")
     
     # Create parallel environments using SubprocVecEnv
-    num_envs = min(mp.cpu_count(), 8)  # Use up to 8 parallel environments
-    print(f"Creating {num_envs} parallel environments...")
+    if n_envs is None:
+        n_envs = min(mp.cpu_count(), 8)  # Use up to 8 parallel environments by default
+    print(f"Creating {n_envs} parallel environments with opponent type: {opponent_type}...")
     
     def make_env():
-        return TronEnv(grid_size=32, max_steps=500)
+        return TronEnv(grid_size=32, max_steps=500, opponent_type=opponent_type)
     
     # Use SubprocVecEnv for parallel execution
-    env = SubprocVecEnv([make_env for _ in range(num_envs)])
+    env = SubprocVecEnv([make_env for _ in range(n_envs)])
     
     # Apply frame stacking (N=4) for temporal information
     n_stack = 4
@@ -119,7 +122,7 @@ def train(
     )
     
     # Create evaluation environment (single env for eval)
-    eval_env = DummyVecEnv([make_env])
+    eval_env = DummyVecEnv([lambda: TronEnv(grid_size=32, max_steps=500, opponent_type=opponent_type)])
     eval_env = VecFrameStack(eval_env, n_stack=n_stack)
     eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=True, training=False, norm_reward=False)
     
@@ -187,6 +190,11 @@ def main():
     parser.add_argument("--verbose", type=int, default=1, help="Verbosity level")
     parser.add_argument("--save-dir", type=str, default="./ppo_tron_checkpoints", help="Save directory")
     parser.add_argument("--eval-freq", type=int, default=10000, help="Evaluation frequency")
+    parser.add_argument("--opponent", type=str, default="heuristic", 
+                       choices=["random", "heuristic", "lookahead", "minimax"],
+                       help="Opponent type to train against")
+    parser.add_argument("--n-envs", type=int, default=None, 
+                       help="Number of parallel environments (default: min(cpu_count, 8))")
     
     args = parser.parse_args()
     
@@ -201,6 +209,8 @@ def main():
         verbose=args.verbose,
         save_dir=args.save_dir,
         eval_freq=args.eval_freq,
+        opponent_type=args.opponent,
+        n_envs=args.n_envs,
     )
 
 

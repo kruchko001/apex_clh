@@ -28,6 +28,7 @@ from gymnasium import spaces
 import numpy as np
 import pygame
 from typing import Optional, Tuple, Dict, Any
+from tron_solution.env.opponents import get_opponent, BaseOpponent
 
 
 class TronEnv(gym.Env):
@@ -52,12 +53,16 @@ class TronEnv(gym.Env):
         LEFT: (0, -1),
     }
     
-    def __init__(self, grid_size: int = 32, max_steps: int = 500, render_mode: Optional[str] = None):
+    def __init__(self, grid_size: int = 32, max_steps: int = 500, render_mode: Optional[str] = None,
+                 opponent_type: str = "heuristic"):
         super().__init__()
         
         self.grid_size = grid_size
         self.max_steps = max_steps
         self.render_mode = render_mode
+        
+        # Initialize opponent
+        self.opponent = get_opponent(opponent_type)
         
         # Observation space: (5, 32, 32) float tensor
         self.observation_space = spaces.Box(
@@ -217,32 +222,31 @@ class TronEnv(gym.Env):
         return obs, reward, terminated, truncated, info
     
     def _move_opponent(self):
-        """Simple AI for opponent movement."""
-        dr, dc = self.DIRECTIONS[self.opponent_direction]
-        new_r = self.opponent_head[0] + dr
-        new_c = self.opponent_head[1] + dc
+        """Move opponent using the selected opponent strategy."""
+        # Get opponent action from the opponent class
+        action = self.opponent.get_action(
+            obs=self._get_observation(),
+            my_head=self.my_head,
+            opp_head=self.opponent_head,
+            grid=self._get_grid()
+        )
+        self.opponent_direction = action
+    
+    def _get_grid(self) -> np.ndarray:
+        """Get internal grid representation for opponent AI.
         
-        # Check if current direction leads to collision
-        would_collide, _ = self._check_collision((new_r, new_c))
-        
-        if would_collide:
-            # Try alternative directions
-            for new_dir in [self.UP, self.RIGHT, self.DOWN, self.LEFT]:
-                if new_dir == self.opponent_direction:
-                    continue
-                # Don't do 180-degree turn
-                opposite = {self.UP: self.DOWN, self.DOWN: self.UP, self.LEFT: self.RIGHT, self.RIGHT: self.LEFT}
-                if new_dir == opposite.get(self.opponent_direction):
-                    continue
-                    
-                dr_new, dc_new = self.DIRECTIONS[new_dir]
-                test_r = self.opponent_head[0] + dr_new
-                test_c = self.opponent_head[1] + dc_new
-                
-                collides, _ = self._check_collision((test_r, test_c))
-                if not collides:
-                    self.opponent_direction = new_dir
-                    break
+        Returns:
+            grid: (32, 32) int array where:
+                0 = empty
+                1 = wall
+                2 = my_trail
+                3 = opponent_trail
+        """
+        grid = np.zeros((self.grid_size, self.grid_size), dtype=np.int32)
+        grid[self.walls] = 1
+        grid[self.my_trail] = 2
+        grid[self.opponent_trail] = 3
+        return grid
     
     def _check_collision(self, position: Tuple[int, int]) -> Tuple[bool, str]:
         """Check if a position results in collision. Returns (is_collision, collision_type)."""
