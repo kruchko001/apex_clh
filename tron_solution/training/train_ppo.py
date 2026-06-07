@@ -10,9 +10,11 @@ import os
 import torch
 import numpy as np
 from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+from stable_baselines3.common.vec_env import SubprocVecEnv, VecNormalize, DummyVecEnv
 from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
+from stable_baselines3.common.env_util import make_vec_env
 from datetime import datetime
+import multiprocessing as mp
 
 from tron_solution.env.tron_env import TronEnv
 from tron_solution.model.tron_cnn import TronCNN
@@ -79,11 +81,19 @@ def train(
         n_eval_episodes: Number of episodes for evaluation
     """
     
-    # Create environment
+    # Detect device
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Using device: {device}")
+    
+    # Create parallel environments using SubprocVecEnv
+    num_envs = min(mp.cpu_count(), 8)  # Use up to 8 parallel environments
+    print(f"Creating {num_envs} parallel environments...")
+    
     def make_env():
         return TronEnv(grid_size=32, max_steps=500)
     
-    env = DummyVecEnv([make_env])
+    # Use SubprocVecEnv for parallel execution
+    env = SubprocVecEnv([make_env for _ in range(num_envs)])
     
     # Normalize observations and rewards
     env = VecNormalize(env, norm_obs=True, norm_reward=True, clip_obs=10., clip_reward=10.)
@@ -99,7 +109,7 @@ def train(
         verbose=verbose,
     )
     
-    # Create evaluation environment
+    # Create evaluation environment (single env for eval)
     eval_env = DummyVecEnv([make_env])
     eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=True, training=False, norm_reward=False)
     
@@ -130,22 +140,27 @@ def train(
         max_grad_norm=max_grad_norm,
         verbose=verbose,
         tensorboard_log=os.path.join(save_dir, "tensorboard"),
+        device=device,
     )
     
     # Train
-    print(f"Starting training for {total_timesteps} timesteps...")
+    print(f"Starting training for {total_timesteps} timesteps with {num_envs} parallel environments...")
     model.learn(
         total_timesteps=total_timesteps,
         callback=[checkpoint_callback, eval_callback],
         tb_log_name="tron_ppo",
     )
     
-    # Save final model
+    # Save final model and vec_normalize
     final_path = os.path.join(save_dir, f"tron_ppo_final_{timestamp}")
     model.save(final_path)
     env.save(os.path.join(save_dir, f"vec_normalize_final_{timestamp}.pkl"))
     
     print(f"Training complete! Model saved to {final_path}")
+    
+    # Close environments
+    env.close()
+    eval_env.close()
     
     return model, env
 
