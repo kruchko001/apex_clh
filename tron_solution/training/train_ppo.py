@@ -10,7 +10,7 @@ import os
 import torch
 import numpy as np
 from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import SubprocVecEnv, VecNormalize, DummyVecEnv
+from stable_baselines3.common.vec_env import SubprocVecEnv, VecNormalize, DummyVecEnv, VecFrameStack
 from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
 from stable_baselines3.common.env_util import make_vec_env
 from datetime import datetime
@@ -21,13 +21,17 @@ from tron_solution.model.tron_cnn import TronCNN
 
 
 class TronFeaturesExtractor(torch.nn.Module):
-    """Custom feature extractor for SB3."""
+    """Custom feature extractor for SB3 with frame stacking support."""
     
-    def __init__(self, observation_space):
+    def __init__(self, observation_space, n_stack: int = 4):
         super().__init__()
         
-        # Same architecture as TronCNN
-        self.conv1 = torch.nn.Conv2d(5, 16, kernel_size=3, padding=1)
+        # Calculate input channels: 5 channels × n_stack frames
+        self.n_stack = n_stack
+        input_channels = 5 * n_stack  # 20 channels for 4-frame stack
+        
+        # Same architecture as TronCNN but with stacked input
+        self.conv1 = torch.nn.Conv2d(input_channels, 16, kernel_size=3, padding=1)
         self.conv2 = torch.nn.Conv2d(16, 32, kernel_size=3, padding=1)
         self.pool = torch.nn.MaxPool2d(2, 2)
         
@@ -95,6 +99,11 @@ def train(
     # Use SubprocVecEnv for parallel execution
     env = SubprocVecEnv([make_env for _ in range(num_envs)])
     
+    # Apply frame stacking (N=4) for temporal information
+    n_stack = 4
+    print(f"Applying frame stacking with N={n_stack}...")
+    env = VecFrameStack(env, n_stack=n_stack)
+    
     # Normalize observations and rewards
     env = VecNormalize(env, norm_obs=True, norm_reward=True, clip_obs=10., clip_reward=10.)
     
@@ -111,6 +120,7 @@ def train(
     
     # Create evaluation environment (single env for eval)
     eval_env = DummyVecEnv([make_env])
+    eval_env = VecFrameStack(eval_env, n_stack=n_stack)
     eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=True, training=False, norm_reward=False)
     
     eval_callback = EvalCallback(

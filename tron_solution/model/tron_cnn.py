@@ -1,13 +1,13 @@
 """
 Lightweight CNN Actor-Critic Model for Tron.
 
-Input: (batch, 5, 32, 32) observation tensor
+Input: (batch, 20, 32, 32) observation tensor (5 channels × 4 stacked frames)
 Output: 
   - Actor: (batch, 4) action logits
   - Critic: (batch, 1) value estimate
 
 Architecture:
-  - Conv2d(5, 16, 3x3) + ReLU + MaxPool
+  - Conv2d(20, 16, 3x3) + ReLU + MaxPool
   - Conv2d(16, 32, 3x3) + ReLU + MaxPool
   - Flatten -> Linear(8192, 128) + ReLU (shared)
   - Actor head: Linear(128, 4)
@@ -25,16 +25,16 @@ from typing import Tuple
 class TronCNN(nn.Module):
     """Lightweight CNN for Tron game."""
     
-    def __init__(self):
+    def __init__(self, input_channels: int = 20):
         super().__init__()
         
         # Convolutional layers
-        self.conv1 = nn.Conv2d(5, 16, kernel_size=3, padding=1)
+        self.conv1 = nn.Conv2d(input_channels, 16, kernel_size=3, padding=1)
         self.conv2 = nn.Conv2d(16, 32, kernel_size=3, padding=1)
         self.pool = nn.MaxPool2d(2, 2)
         
         # Calculate flattened size after convolutions
-        # Input: (5, 32, 32)
+        # Input: (input_channels, 32, 32)
         # After conv1 + pool: (16, 16, 16)
         # After conv2 + pool: (32, 8, 8)
         self.flat_size = 32 * 8 * 8  # 2048
@@ -53,7 +53,7 @@ class TronCNN(nn.Module):
         Forward pass.
         
         Args:
-            x: Input tensor of shape (batch, 5, 32, 32)
+            x: Input tensor of shape (batch, 20, 32, 32)
             
         Returns:
             Tuple of (action_logits, value)
@@ -81,7 +81,7 @@ class TronCNN(nn.Module):
         Sample or select action from policy.
         
         Args:
-            obs: Observation tensor of shape (batch, 5, 32, 32) or (5, 32, 32)
+            obs: Observation tensor of shape (batch, 20, 32, 32) or (20, 32, 32)
             deterministic: If True, select argmax action; otherwise sample
             
         Returns:
@@ -104,7 +104,7 @@ class TronCNN(nn.Module):
         Evaluate actions for PPO training.
         
         Args:
-            obs: Observation tensor of shape (batch, 5, 32, 32)
+            obs: Observation tensor of shape (batch, 20, 32, 32)
             actions: Action tensor of shape (batch,)
             
         Returns:
