@@ -28,7 +28,7 @@ from gymnasium import spaces
 import numpy as np
 import pygame
 from typing import Optional, Tuple, Dict, Any
-from tron_solution.env.opponents import get_opponent, BaseOpponent
+from .opponents import get_opponent, BaseOpponent
 
 
 class TronEnv(gym.Env):
