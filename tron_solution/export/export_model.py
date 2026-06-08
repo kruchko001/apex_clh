@@ -14,6 +14,22 @@ Usage:
 
 import argparse
 import os
+import importlib.util
+
+_d = os.path.dirname(os.path.abspath(__file__))
+while True:
+    _p = os.path.join(_d, "_path.py")
+    if os.path.isfile(_p):
+        _s = importlib.util.spec_from_file_location("_path", _p)
+        _m = importlib.util.module_from_spec(_s)
+        _s.loader.exec_module(_m)
+        _m.setup_path(__file__)
+        break
+    _parent = os.path.dirname(_d)
+    if _parent == _d:
+        raise ImportError("Could not locate tron_solution package root")
+    _d = _parent
+
 import glob
 import torch
 import numpy as np
@@ -21,8 +37,10 @@ import numpy as np
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
-from tron_solution.env.tron_env import TronEnv
-from tron_solution.model.tron_cnn import TronCNN, export_to_torchscript
+from tron_solution.env.opponents import DEFAULT_OPPONENT_TYPE, DEFAULT_MINIMAX_DEPTH
+from tron_solution.model.tron_cnn import TronCNN
+from tron_solution.model.obs import INPUT_CHANNELS, PLAY_SIZE
+from tron_solution.model.stacked_policy import export_stacked_policy
 
 
 def extract_actor_weights(sb3_model: PPO) -> dict:
@@ -94,7 +112,12 @@ def export_model(
     if train_first:
         print(f"Training new model for {timesteps} timesteps...")
         from tron_solution.training.train_ppo import train
-        model, env = train(total_timesteps=timesteps, verbose=1)
+        model, env = train(
+            total_timesteps=timesteps,
+            verbose=1,
+            opponent_type=DEFAULT_OPPONENT_TYPE,
+            minimax_depth=DEFAULT_MINIMAX_DEPTH,
+        )
         
         # Find the saved model
         checkpoint_dir = "./ppo_tron_checkpoints"
@@ -120,7 +143,7 @@ def export_model(
     sb3_model = PPO.load(model_path)
     
     # Create our custom model
-    custom_model = TronCNN()
+    custom_model = TronCNN(input_channels=INPUT_CHANNELS, spatial=PLAY_SIZE)
     
     # Extract and load weights
     weights = extract_actor_weights(sb3_model)
@@ -145,22 +168,18 @@ def export_model(
     
     # Export to TorchScript
     custom_model.eval()
-    export_to_torchscript(custom_model, output_path)
+    export_stacked_policy(custom_model, output_path)
     
-    # Verify exported model
-    print("\nVerifying exported model...")
+    print("\nVerifying exported model (sandbox 1x5x32x32 -> crop+stack -> 4 logits)...")
     loaded_model = torch.jit.load(output_path)
     
-    # Test inference
     test_input = torch.randn(1, 5, 32, 32)
     with torch.no_grad():
-        logits, value = loaded_model(test_input)
+        logits = loaded_model(test_input)
     
-    print(f"✓ Inference successful!")
+    print(f"Inference successful!")
     print(f"  - Output logits shape: {logits.shape}")
-    print(f"  - Output value shape: {value.shape}")
     
-    # Benchmark
     import time
     iterations = 1000
     start = time.time()
@@ -168,10 +187,10 @@ def export_model(
         with torch.no_grad():
             loaded_model(test_input)
     elapsed = time.time() - start
-    avg_time = (elapsed / iterations) * 1000  # ms
+    avg_time = (elapsed / iterations) * 1000
     
     print(f"  - Average inference time: {avg_time:.2f}ms")
-    print(f"  - Meets <50ms requirement: {'✓ Yes' if avg_time < 50 else '✗ No'}")
+    print(f"  - Meets <50ms requirement: {'Yes' if avg_time < 50 else 'No'}")
     
     print(f"\nModel exported successfully to: {output_path}")
     

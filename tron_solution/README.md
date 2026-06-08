@@ -6,7 +6,8 @@ Reinforcement Learning agent for Bittensor Subnet 1 (Tron Light Cycles game).
 
 - **Custom Gymnasium Environment**: `(5, 32, 32)` observation space with proper reward shaping
 - **Lightweight CNN Model**: <5ms inference time, TorchScript compatible
-- **PPO Training**: Stable Baselines3 implementation with checkpointing
+- **Advanced Minimax Opponent**: Voronoi territory, wall-cut heuristics (same AI as `play_human.py`)
+- **PPO Training**: Stable Baselines3, trains against minimax by default
 - **Export Pipeline**: Easy export to TorchScript for deployment
 
 ## Installation
@@ -20,11 +21,11 @@ pip install gymnasium torch stable-baselines3 pygame numpy
 ### Train
 
 ```bash
-# Using CLI
+# Using CLI (trains vs minimax opponent, depth 10)
 python main.py train --timesteps 100000 --verbose
 
 # Or directly
-python -m tron_solution.training.train_ppo --timesteps 100000
+python -m tron_solution.training.train_ppo --timesteps 100000 --opponent minimax --minimax-depth 10
 ```
 
 ### Export
@@ -79,12 +80,12 @@ tron_solution/
 - `Discrete(4)`: UP, RIGHT, DOWN, LEFT
 
 ### Reward Shaping
-- Clean kill (opponent hits my trail): **+2.0**
-- Opponent self-destructs: **+1.5**
-- Mutual destruction: **+0.5**
-- Timeout draw: **0.0**
-- Die alone: **-2.0**
-- Step survival: **+0.01**
+- Clean kill (opponent hits my trail): **+3.0**
+- Opponent self-destructs: **+2.0**
+- Mutual destruction: **0.0**
+- Timeout draw (500 steps): **-1.0**
+- Die alone: **-3.0**
+- Per-step (alive): **+0.002** survival + territory / voronoi / mobility shaping
 
 ## Model Architecture
 

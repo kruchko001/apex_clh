@@ -42,3 +42,10 @@ Thumbs.db
 .env
 .env.local
 *.env.*
+
+# Training artifacts
+ppo_tron_checkpoints/
+*.pt
+*.pkl
+tron_solution/*.jsonl
+tron_solution/_tb_map.txt

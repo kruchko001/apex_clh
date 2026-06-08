@@ -1,12 +1,7 @@
 """
 Custom Gymnasium Environment for Tron Light Cycles Game.
 
-Observation Space: (5, 32, 32) float tensor
-  - Channel 0: Walls (border)
-  - Channel 1: My trail
-  - Channel 2: Opponent trail
-  - Channel 3: My head position
-  - Channel 4: Opponent head position
+Observation Space: (4, 30, 30) — trails + heads
 
 Action Space: Discrete(4)
   - 0: UP
@@ -14,21 +9,17 @@ Action Space: Discrete(4)
   - 2: DOWN
   - 3: LEFT
 
-Reward Shaping:
-  - Clean kill (opponent hits my trail): +2.0
-  - Opponent self-destructs (hits wall/own trail): +1.5
-  - Mutual destruction (head-on or simultaneous): +0.5
-  - Timeout draw (500 steps): 0.0
-  - Die alone (hit wall/own trail): -2.0
-  - Step survival: +0.01
+Training reward (aggressive):
+  - Per-step: -0.01 | Clean kill: +10 | Die: -10
+  - info["official_score"] still uses competition cascade for eval
 """
 
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
-import pygame
 from typing import Optional, Tuple, Dict, Any
-from .opponents import get_opponent, BaseOpponent
+from .opponents import get_opponent, DEFAULT_OPPONENT_TYPE
+from ..model.obs import GRID_CHANNELS, PLAY_SIZE, crop_sandbox_obs_np
 
 
 class TronEnv(gym.Env):
@@ -44,6 +35,16 @@ class TronEnv(gym.Env):
     RIGHT = 1
     DOWN = 2
     LEFT = 3
+
+    SPAWN_P0 = (1, 1)
+    SPAWN_P1 = (30, 30)
+    SPAWN_P0_DIR = DOWN
+    SPAWN_P1_DIR = UP
+    OPPOSITE = {UP: DOWN, DOWN: UP, LEFT: RIGHT, RIGHT: LEFT}
+
+    STEP_REWARD = -0.01
+    WIN_REWARD = 10.0
+    LOSS_REWARD = -10.0
     
     # Direction vectors
     DIRECTIONS = {
@@ -54,22 +55,24 @@ class TronEnv(gym.Env):
     }
     
     def __init__(self, grid_size: int = 32, max_steps: int = 500, render_mode: Optional[str] = None,
-                 opponent_type: str = "heuristic"):
+                 opponent_type: str = None, minimax_depth: int = None,
+                 render_my_label: Optional[str] = None, render_opp_label: Optional[str] = None,
+                 play_as: int = 0):
         super().__init__()
         
         self.grid_size = grid_size
         self.max_steps = max_steps
         self.render_mode = render_mode
+        self.render_my_label = render_my_label
+        self.render_opp_label = render_opp_label
+        self.play_as = play_as
         
-        # Initialize opponent
-        self.opponent = get_opponent(opponent_type)
-        
-        # Observation space: (5, 32, 32) float tensor
+        self.opponent_type = opponent_type or DEFAULT_OPPONENT_TYPE
+        self.minimax_depth = minimax_depth
+        self.opponent = get_opponent(self.opponent_type, self.minimax_depth)
+
         self.observation_space = spaces.Box(
-            low=0.0,
-            high=1.0,
-            shape=(5, grid_size, grid_size),
-            dtype=np.float32
+            0.0, 1.0, (GRID_CHANNELS, PLAY_SIZE, PLAY_SIZE), dtype=np.float32,
         )
         
         # Action space: Discrete(4)
@@ -89,148 +92,208 @@ class TronEnv(gym.Env):
         self.window = None
         self.clock = None
         self.cell_size = 20
+        self.render_message = None
+
+    def set_minimax_depth(self, depth: int):
+        self.minimax_depth = depth
+        if hasattr(self.opponent, "max_depth"):
+            self.opponent.max_depth = depth
         
     def reset(self, seed: Optional[int] = None, options: Optional[dict] = None) -> Tuple[np.ndarray, Dict[str, Any]]:
         super().reset(seed=seed)
-        
-        # Initialize trails as boolean grids
+        opts = options or {}
+        play_as = opts.get("play_as", self.play_as)
+
         self.my_trail = np.zeros((self.grid_size, self.grid_size), dtype=bool)
         self.opponent_trail = np.zeros((self.grid_size, self.grid_size), dtype=bool)
-        
-        # Initialize walls (border)
         self.walls = np.zeros((self.grid_size, self.grid_size), dtype=bool)
-        self.walls[0, :] = True  # Top border
-        self.walls[-1, :] = True  # Bottom border
-        self.walls[:, 0] = True  # Left border
-        self.walls[:, -1] = True  # Right border
-        
-        # Random starting positions (not on borders)
-        margin = 2
-        my_start = self.np_random.integers(margin, self.grid_size - margin, size=2)
-        opponent_start = self.np_random.integers(margin, self.grid_size - margin, size=2)
-        
-        # Ensure they don't start at the same position
-        while np.array_equal(my_start, opponent_start):
-            opponent_start = self.np_random.integers(margin, self.grid_size - margin, size=2)
-        
-        self.my_head = tuple(my_start)
-        self.opponent_head = tuple(opponent_start)
-        
-        # Mark initial positions in trails
+        self.walls[0, :] = True
+        self.walls[-1, :] = True
+        self.walls[:, 0] = True
+        self.walls[:, -1] = True
+
+        if play_as == 0:
+            self.my_head = self.SPAWN_P0
+            self.opponent_head = self.SPAWN_P1
+            self.current_direction = self.SPAWN_P0_DIR
+            self.opponent_direction = self.SPAWN_P1_DIR
+        else:
+            self.my_head = self.SPAWN_P1
+            self.opponent_head = self.SPAWN_P0
+            self.current_direction = self.SPAWN_P1_DIR
+            self.opponent_direction = self.SPAWN_P0_DIR
+
         self.my_trail[self.my_head] = True
         self.opponent_trail[self.opponent_head] = True
-        
-        # Random initial directions
-        self.current_direction = self.np_random.choice([self.UP, self.RIGHT, self.DOWN, self.LEFT])
-        self.opponent_direction = self.np_random.choice([self.UP, self.RIGHT, self.DOWN, self.LEFT])
-        
         self.step_count = 0
-        
-        return self._get_observation(), {"step_count": 0}
+        if hasattr(self.opponent, "reset"):
+            self.opponent.reset()
+
+        return self._get_observation(), {"step_count": 0, "play_as": play_as}
+
+    @property
+    def grid(self) -> np.ndarray:
+        g = np.zeros((self.grid_size, self.grid_size), dtype=np.int8)
+        g[self.walls] = -1
+        g[self.my_trail] = 1
+        g[self.opponent_trail] = 2
+        return g
+
+    @grid.setter
+    def grid(self, value: np.ndarray):
+        self.walls = value == -1
+        self.my_trail = value == 1
+        self.opponent_trail = value == 2
+
+    @property
+    def p1_pos(self):
+        return self.my_head
+
+    @p1_pos.setter
+    def p1_pos(self, value):
+        self.my_head = value
+
+    @property
+    def p2_pos(self):
+        return self.opponent_head
+
+    @p2_pos.setter
+    def p2_pos(self, value):
+        self.opponent_head = value
+
+    @property
+    def p1_dir(self):
+        return self.current_direction
+
+    @p1_dir.setter
+    def p1_dir(self, value):
+        self.current_direction = value
+
+    @property
+    def p2_dir(self):
+        return self.opponent_direction
+
+    @p2_dir.setter
+    def p2_dir(self, value):
+        self.opponent_direction = value
     
     def step(self, action: int) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
-        # Prevent 180-degree turns
-        opposite_directions = {
-            self.UP: self.DOWN,
-            self.DOWN: self.UP,
-            self.LEFT: self.RIGHT,
-            self.RIGHT: self.LEFT,
-        }
-        
-        if action != opposite_directions.get(self.current_direction):
+        if action != self.OPPOSITE[self.current_direction]:
             self.current_direction = action
-        
-        # Move opponent with simple AI (avoid immediate collisions)
         self._move_opponent()
-        
-        # Calculate new positions
+        return self._step_after_directions()
+
+    def step_dual(self, my_action: int, opp_action: int) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
+        if my_action != self.OPPOSITE[self.current_direction]:
+            self.current_direction = my_action
+        if opp_action != self.OPPOSITE[self.opponent_direction]:
+            self.opponent_direction = opp_action
+        return self._step_after_directions()
+
+    def _step_after_directions(self) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
+        self.step_count += 1
+
         dr, dc = self.DIRECTIONS[self.current_direction]
         new_my_head = (self.my_head[0] + dr, self.my_head[1] + dc)
-        
         dr_opp, dc_opp = self.DIRECTIONS[self.opponent_direction]
         new_opponent_head = (self.opponent_head[0] + dr_opp, self.opponent_head[1] + dc_opp)
-        
-        # Check collisions
+
         my_collision, my_collision_type = self._check_collision(new_my_head)
         opp_collision, opp_collision_type = self._check_collision(new_opponent_head)
-        
-        # Determine outcome and rewards
+        if not my_collision and not opp_collision and new_my_head == new_opponent_head:
+            my_collision = opp_collision = True
+            my_collision_type = opp_collision_type = "head_on"
+
         reward = 0.0
         terminated = False
+        truncated = False
         info = {
-            "my_collision_type": my_collision_type,
-            "opponent_collision_type": opp_collision_type,
+            "my_collision_type": my_collision_type if my_collision else "",
+            "opponent_collision_type": opp_collision_type if opp_collision else "",
             "clean_kill": False,
             "opponent_self_destruct": False,
             "mutual_destruction": False,
             "timeout": False,
+            "truncated": False,
+            "official_score": 0.0,
+            "log_step": self.step_count,
         }
-        
-        # Both survive this step
+
         if not my_collision and not opp_collision:
-            # Update positions
             self.my_head = new_my_head
             self.opponent_head = new_opponent_head
-            
-            # Add to trails
             self.my_trail[self.my_head] = True
             self.opponent_trail[self.opponent_head] = True
-            
-            # Survival reward
-            reward = 0.01
-            self.step_count += 1
-            
-            # Check timeout
+            reward = self.STEP_REWARD
             if self.step_count >= self.max_steps:
-                terminated = True
+                truncated = True
                 info["timeout"] = True
-                # Draw: no additional reward
-                
-        # Both collide (mutual destruction)
+                reward = self.LOSS_REWARD * 0.5
+                info["official_score"] = 0.25
         elif my_collision and opp_collision:
             terminated = True
-            reward = 0.5
             info["mutual_destruction"] = True
-            
-        # Only I collide (I die)
+            if opp_collision_type == "my_trail":
+                reward = self.WIN_REWARD * 0.4
+                info["official_score"] = 0.40
+                info["clean_kill"] = True
+            elif my_collision_type == "opponent_trail":
+                reward = self.LOSS_REWARD * 0.5
+                info["official_score"] = 0.10
+            else:
+                reward = self.LOSS_REWARD * 0.4
+                info["official_score"] = 0.40
         elif my_collision:
             terminated = True
-            reward = -2.0
-            
-            # Check if opponent hit my trail (clean kill for them, but we track it)
-            if opp_collision_type == "trail" and new_opponent_head == new_my_head:
-                # Head-on collision already handled above
-                pass
-                
-        # Only opponent collides (I win)
-        elif opp_collision:
+            reward = self.LOSS_REWARD
+            info["official_score"] = 0.0
+        else:
             terminated = True
-            
-            # Determine type of opponent collision
-            if opp_collision_type == "trail" and new_opponent_head in [tuple(p) for p in np.argwhere(self.my_trail)]:
-                # Opponent hit my trail - clean kill
-                reward = 2.0
+            if opp_collision_type == "my_trail":
+                reward = self.WIN_REWARD
+                info["official_score"] = 1.0
                 info["clean_kill"] = True
-            else:
-                # Opponent self-destructed (hit wall or own trail)
-                reward = 1.5
+            elif opp_collision_type in ("wall", "my_trail"):
+                reward = self.WIN_REWARD * 0.8
+                info["official_score"] = 0.80
                 info["opponent_self_destruct"] = True
-        
-        obs = self._get_observation()
-        truncated = False
-        
-        return obs, reward, terminated, truncated, info
+            else:
+                reward = self.WIN_REWARD * 0.5
+                info["official_score"] = 0.10
+
+        info["truncated"] = truncated
+        return self._get_observation(), reward, terminated, truncated, info
+
+    def valid_actions(self) -> np.ndarray:
+        mask = np.zeros(4, dtype=bool)
+        reverse = self.OPPOSITE[self.current_direction]
+        for a in range(4):
+            if a == reverse:
+                continue
+            dr, dc = self.DIRECTIONS[a]
+            r, c = self.my_head[0] + dr, self.my_head[1] + dc
+            if r < 0 or r >= self.grid_size or c < 0 or c >= self.grid_size:
+                continue
+            if self.walls[r, c] or self.my_trail[r, c] or self.opponent_trail[r, c]:
+                continue
+            mask[a] = True
+        if not mask.any():
+            mask[self.current_direction] = True
+        return mask
     
     def _move_opponent(self):
         """Move opponent using the selected opponent strategy."""
         # Get opponent action from the opponent class
         action = self.opponent.get_action(
-            obs=self._get_observation(),
+            obs=self._get_grid_obs(),
             my_head=self.my_head,
             opp_head=self.opponent_head,
-            grid=self._get_grid()
+            grid=self._get_grid(),
+            current_dir=self.opponent_direction,
+            my_dir=self.current_direction,
         )
-        self.opponent_direction = action
+        if action != self.OPPOSITE[self.opponent_direction]:
+            self.opponent_direction = action
     
     def _get_grid(self) -> np.ndarray:
         """Get internal grid representation for opponent AI.
@@ -269,27 +332,18 @@ class TronEnv(gym.Env):
             return True, "opponent_trail"
         
         return False, ""
-    
+
+    def _get_grid_obs(self) -> np.ndarray:
+        full = np.zeros((5, self.grid_size, self.grid_size), dtype=np.float32)
+        full[0] = self.walls.astype(np.float32)
+        full[1] = self.my_trail.astype(np.float32)
+        full[2] = self.opponent_trail.astype(np.float32)
+        full[3, self.my_head[0], self.my_head[1]] = 1.0
+        full[4, self.opponent_head[0], self.opponent_head[1]] = 1.0
+        return crop_sandbox_obs_np(full)
+
     def _get_observation(self) -> np.ndarray:
-        """Get observation as (5, 32, 32) float tensor."""
-        obs = np.zeros((5, self.grid_size, self.grid_size), dtype=np.float32)
-        
-        # Channel 0: Walls
-        obs[0] = self.walls.astype(np.float32)
-        
-        # Channel 1: My trail
-        obs[1] = self.my_trail.astype(np.float32)
-        
-        # Channel 2: Opponent trail
-        obs[2] = self.opponent_trail.astype(np.float32)
-        
-        # Channel 3: My head
-        obs[3, self.my_head[0], self.my_head[1]] = 1.0
-        
-        # Channel 4: Opponent head
-        obs[4, self.opponent_head[0], self.opponent_head[1]] = 1.0
-        
-        return obs
+        return self._get_grid_obs()
     
     def render(self):
         if self.render_mode == "human":
@@ -305,63 +359,84 @@ class TronEnv(gym.Env):
         except ImportError:
             raise ImportError("pygame is required for human rendering. Install with: pip install pygame")
         
+        cs = self.cell_size
+        w = self.grid_size * cs
         if self.window is None:
             pygame.init()
-            self.window = pygame.display.set_mode(
-                (self.grid_size * self.cell_size, self.grid_size * self.cell_size)
-            )
-            pygame.display.set_caption("Tron Light Cycles")
+            self.window = pygame.display.set_mode((w, w))
+            cap = "Tron Light Cycles"
+            if self.render_my_label and self.render_opp_label:
+                cap = f"Tron: {self.render_my_label} vs {self.render_opp_label}"
+            pygame.display.set_caption(cap)
             self.clock = pygame.time.Clock()
+            self._label_font = pygame.font.SysFont("Arial", 11, bold=True)
+            self._status_font = pygame.font.SysFont("Arial", 24, bold=True)
+            self._big_font = pygame.font.SysFont("Arial", 48, bold=True)
+            self._hint_font = pygame.font.SysFont("Arial", 24, bold=True)
         
-        # Clear screen
-        self.window.fill((0, 0, 0))
-        
-        # Draw walls
+        black = (0, 0, 0)
+        wall = (70, 70, 70)
+        grid_line = (28, 28, 28)
+        blue = (0, 120, 255)
+        red = (255, 50, 50)
+        my_head = (100, 200, 255)
+        opp_head = (255, 100, 100)
+        white = (255, 255, 255)
+
+        self.window.fill(black)
+
         for r in range(self.grid_size):
             for c in range(self.grid_size):
+                x, y = c * cs, r * cs
+                rect = pygame.Rect(x, y, cs, cs)
                 if self.walls[r, c]:
-                    pygame.draw.rect(
-                        self.window,
-                        (100, 100, 100),
-                        (c * self.cell_size, r * self.cell_size, self.cell_size, self.cell_size)
-                    )
-        
-        # Draw my trail (blue)
-        for r in range(self.grid_size):
-            for c in range(self.grid_size):
-                if self.my_trail[r, c]:
-                    pygame.draw.rect(
-                        self.window,
-                        (0, 0, 255),
-                        (c * self.cell_size, r * self.cell_size, self.cell_size - 1, self.cell_size - 1)
-                    )
-        
-        # Draw opponent trail (red)
-        for r in range(self.grid_size):
-            for c in range(self.grid_size):
-                if self.opponent_trail[r, c]:
-                    pygame.draw.rect(
-                        self.window,
-                        (255, 0, 0),
-                        (c * self.cell_size, r * self.cell_size, self.cell_size - 1, self.cell_size - 1)
-                    )
-        
-        # Draw my head (light blue)
+                    pygame.draw.rect(self.window, wall, rect)
+                elif self.my_trail[r, c]:
+                    pygame.draw.rect(self.window, blue, rect)
+                elif self.opponent_trail[r, c]:
+                    pygame.draw.rect(self.window, red, rect)
+
+        for c in range(self.grid_size + 1):
+            x = c * cs
+            pygame.draw.line(self.window, grid_line, (x, 0), (x, w))
+        for r in range(self.grid_size + 1):
+            y = r * cs
+            pygame.draw.line(self.window, grid_line, (0, y), (w, y))
+
         pygame.draw.rect(
-            self.window,
-            (100, 100, 255),
-            (self.my_head[1] * self.cell_size, self.my_head[0] * self.cell_size, self.cell_size, self.cell_size)
+            self.window, my_head,
+            (self.my_head[1] * cs, self.my_head[0] * cs, cs, cs)
         )
-        
-        # Draw opponent head (pink)
         pygame.draw.rect(
-            self.window,
-            (255, 100, 100),
-            (self.opponent_head[1] * self.cell_size, self.opponent_head[0] * self.cell_size, self.cell_size, self.cell_size)
+            self.window, opp_head,
+            (self.opponent_head[1] * cs, self.opponent_head[0] * cs, cs, cs)
         )
-        
+
+        def head_label(pos, text):
+            surf = self._label_font.render(text, True, white)
+            cx = pos[1] * cs + cs // 2
+            cy = pos[0] * cs + cs // 2
+            self.window.blit(surf, surf.get_rect(center=(cx, cy)))
+
+        if self.render_my_label:
+            head_label(self.my_head, self.render_my_label)
+        if self.render_opp_label:
+            head_label(self.opponent_head, self.render_opp_label)
+
+        status = f"Step {self.step_count}"
+        if self.render_my_label and self.render_opp_label:
+            status = f"{self.render_my_label} vs {self.render_opp_label}  |  {status}"
+        self.window.blit(self._status_font.render(status, True, white), (10, 10))
+
+        if self.render_message:
+            msg_surf = self._big_font.render(self.render_message, True, white)
+            self.window.blit(msg_surf, msg_surf.get_rect(center=(w // 2, w // 2)))
+            hint = "Press SPACE for next duel  |  ESC to quit"
+            hint_surf = self._hint_font.render(hint, True, (200, 200, 200))
+            self.window.blit(hint_surf, hint_surf.get_rect(center=(w // 2, w // 2 + 50)))
+
         pygame.display.flip()
-        self.clock.tick(self.metadata["render_fps"])
+        self.clock.tick(30 if self.render_message else self.metadata["render_fps"])
         
         return self.window
     
