@@ -42,6 +42,10 @@ from tron_solution.model.obs import N_STACK, VALID_DIM, apply_action_mask, cnn_f
 
 
 class TronMaskedActorCriticPolicy(ActorCriticPolicy):
+    def forward(self, obs, deterministic: bool = False):
+        self._valid = obs["valid"]
+        return super().forward(obs, deterministic=deterministic)
+
     def get_distribution(self, obs):
         self._valid = obs["valid"]
         features = super().extract_features(obs, self.pi_features_extractor)
@@ -78,33 +82,84 @@ class TronFeaturesExtractor(BaseFeaturesExtractor):
         return torch.nn.functional.relu(self.shared_fc(x))
 
 
+def outcome_from_info(info: dict) -> str:
+    if info.get("clean_kill") or info.get("opponent_self_destruct"):
+        return "W"
+    if info.get("my_collision_type") and not info.get("opponent_collision_type"):
+        return "L"
+    return "D"
+
+
+def count_wld(model, env, n_episodes, deterministic=True):
+    wins = losses = draws = 0
+    for _ in range(n_episodes):
+        obs = env.reset()
+        done = False
+        info = {}
+        while not done:
+            action, _ = model.predict(obs, deterministic=deterministic)
+            obs, _, dones, infos = env.step(action)
+            done = bool(dones[0])
+            info = infos[0]
+        o = outcome_from_info(info)
+        if o == "W":
+            wins += 1
+        elif o == "L":
+            losses += 1
+        else:
+            draws += 1
+    return wins, losses, draws
+
+
 class RewardLogCallback(BaseCallback):
     def __init__(self, verbose: int = 1):
         super().__init__(verbose)
         self.iteration = 0
         self.episode_rewards = []
+        self.wins = 0
+        self.losses = 0
+        self.draws = 0
 
     def _on_step(self) -> bool:
         infos = self.locals.get("infos", [])
         for info in infos:
             if isinstance(info, dict) and "episode" in info:
                 self.episode_rewards.append(info["episode"]["r"])
+                o = outcome_from_info(info)
+                if o == "W":
+                    self.wins += 1
+                elif o == "L":
+                    self.losses += 1
+                else:
+                    self.draws += 1
         return True
 
     def _on_rollout_end(self) -> None:
         self.iteration += 1
         if self.episode_rewards:
             mean_r = float(np.mean(self.episode_rewards))
+            n = len(self.episode_rewards)
             print(
                 f"Iteration {self.iteration} | timesteps={self.num_timesteps} | "
-                f"mean_reward={mean_r:.3f} | episodes={len(self.episode_rewards)}"
+                f"mean_reward={mean_r:.3f} | W/L/D={self.wins}/{self.losses}/{self.draws} | episodes={n}"
             )
         elif self.verbose:
             print(f"Iteration {self.iteration} | timesteps={self.num_timesteps} | no completed episodes")
         self.episode_rewards = []
+        self.wins = self.losses = self.draws = 0
 
 
-class EarlyStopEvalCallback(EvalCallback):
+class TronEvalCallback(EvalCallback):
+    def _on_step(self) -> bool:
+        prev_n = len(self.evaluations_results)
+        continue_training = super()._on_step()
+        if len(self.evaluations_results) > prev_n:
+            w, l, d = count_wld(self.model, self.eval_env, self.n_eval_episodes, self.deterministic)
+            print(f"Eval W/L/D: {w}/{l}/{d} ({self.n_eval_episodes} episodes)")
+        return continue_training
+
+
+class EarlyStopEvalCallback(TronEvalCallback):
     def __init__(self, *args, patience=6, min_delta=0.005, **kwargs):
         super().__init__(*args, **kwargs)
         self.patience = patience
@@ -175,6 +230,12 @@ def curriculum_stage_paths(save_dir, run_id, depth):
     return model, vec
 
 
+def warmup_paths(save_dir, run_id):
+    model = os.path.join(save_dir, f"tron_ppo_final_{run_id}_warmup.zip")
+    vec = os.path.join(save_dir, f"vec_normalize_final_{run_id}_warmup.pkl")
+    return model, vec
+
+
 def find_curriculum_resume(save_dir, run_id, stages):
     resume_model, resume_vec, next_idx = None, None, 0
     for idx, (depth, _) in enumerate(stages):
@@ -211,7 +272,7 @@ def default_n_envs(cpu_count, opponent_type, minimax_depth, max_envs=None):
     reserve = 2
     available = max(1, (cpu_count or 4) - reserve)
     if opponent_type != "minimax":
-        cap = 16
+        cap = 8
     else:
         depth = minimax_depth or DEFAULT_MINIMAX_DEPTH
         if depth >= 14:
@@ -221,7 +282,7 @@ def default_n_envs(cpu_count, opponent_type, minimax_depth, max_envs=None):
         elif depth >= 8:
             cap = 12
         else:
-            cap = 16
+            cap = 8
     if max_envs is not None:
         cap = min(cap, max_envs)
     return min(available, cap)
@@ -230,7 +291,7 @@ def default_n_envs(cpu_count, opponent_type, minimax_depth, max_envs=None):
 def train(
     total_timesteps: int = 100000,
     learning_rate: float = 3e-4,
-    n_steps: int = 2048,
+    n_steps: int = 512,
     batch_size: int = 64,
     n_epochs: int = 10,
     gamma: float = 0.99,
@@ -300,10 +361,10 @@ def train(
     name_prefix = f"tron_ppo_{timestamp}{stage_suffix}"
     
     def make_env():
-        return GridFrameStackWrapper(Monitor(TronEnv(
+        return Monitor(GridFrameStackWrapper(TronEnv(
             grid_size=32, max_steps=500,
             opponent_type=opponent_type, minimax_depth=minimax_depth,
-        )), n_stack=N_STACK)
+        ), n_stack=N_STACK))
     
     env = SubprocVecEnv([make_env for _ in range(n_envs)])
     print(f"Applying frame stacking with N={N_STACK}...")
@@ -327,24 +388,24 @@ def train(
     
     callback_freq = max(eval_freq // n_envs, 1)
     checkpoint_callback = CheckpointCallback(
-        save_freq=callback_freq,
+        save_freq=max(eval_freq * 10 // n_envs, 1),
         save_path=save_dir,
         name_prefix=name_prefix,
         verbose=verbose,
     )
     
     # Create evaluation environment (single env for eval)
-    eval_env = DummyVecEnv([lambda: GridFrameStackWrapper(Monitor(TronEnv(
+    eval_env = DummyVecEnv([lambda: Monitor(GridFrameStackWrapper(TronEnv(
         grid_size=32, max_steps=500,
         opponent_type=opponent_type, minimax_depth=minimax_depth,
-    )), n_stack=N_STACK)])
+    ), n_stack=N_STACK))])
     eval_env = VecNormalize(
         eval_env, norm_obs=True, norm_reward=False, training=False, norm_obs_keys=["grid"],
     )
     eval_env.obs_rms = env.obs_rms
     eval_env.ret_rms = env.ret_rms
     
-    eval_cls = EarlyStopEvalCallback if early_stop else EvalCallback
+    eval_cls = EarlyStopEvalCallback if early_stop else TronEvalCallback
     eval_kw = dict(
         eval_env=eval_env,
         best_model_save_path=save_dir,
@@ -425,12 +486,12 @@ def train(
     return model, final_zip, vec_path
 
 
-def evaluate_vs_minimax(model, vec_path, depth, n_episodes=20, seed_base=0):
+def evaluate_vs_opponent(model, vec_path, opponent_type, minimax_depth=None, n_episodes=20, seed_base=0):
     def make_env():
-        return GridFrameStackWrapper(Monitor(TronEnv(
+        return Monitor(GridFrameStackWrapper(TronEnv(
             grid_size=32, max_steps=500,
-            opponent_type="minimax", minimax_depth=depth,
-        )), n_stack=N_STACK)
+            opponent_type=opponent_type, minimax_depth=minimax_depth,
+        ), n_stack=N_STACK))
 
     env = DummyVecEnv([make_env])
     env = VecNormalize.load(vec_path, env)
@@ -461,9 +522,10 @@ def evaluate_vs_minimax(model, vec_path, depth, n_episodes=20, seed_base=0):
             info = infos[0]
         rewards.append(ep_reward)
         lengths.append(steps)
-        if info.get("clean_kill") or info.get("opponent_self_destruct"):
+        o = outcome_from_info(info)
+        if o == "W":
             wins += 1
-        elif info.get("my_collision_type") and not info.get("opponent_collision_type"):
+        elif o == "L":
             losses += 1
         else:
             draws += 1
@@ -477,6 +539,13 @@ def evaluate_vs_minimax(model, vec_path, depth, n_episodes=20, seed_base=0):
         "mean_reward": float(np.mean(rewards)),
         "mean_length": float(np.mean(lengths)),
     }
+
+
+def evaluate_vs_minimax(model, vec_path, depth, n_episodes=20, seed_base=0):
+    return evaluate_vs_opponent(
+        model, vec_path, "minimax", minimax_depth=depth,
+        n_episodes=n_episodes, seed_base=seed_base,
+    )
 
 
 def train_curriculum(
@@ -494,10 +563,10 @@ def train_curriculum(
     early_stop_min_delta=0.005,
     stage_gate_win_rate=0.25,
     stage_gate_episodes=20,
-    stage_gate_extra_steps=0,
+    stage_gate_extra_steps=100000,
     no_stage_gate=False,
     warmup_opponent="heuristic",
-    warmup_timesteps=50000,
+    warmup_timesteps=200000,
     **train_kw,
 ):
     import gc
@@ -515,9 +584,14 @@ def train_curriculum(
         if found_model:
             resume, vec_norm = found_model, found_vec
             print(f"Resuming curriculum run {run_id} after stage {start_idx}/{len(stages)}")
-        elif resume_path:
+        elif start_idx == 0:
+            w_model, w_vec = warmup_paths(save_dir, run_id)
+            if os.path.isfile(w_model) and os.path.isfile(w_vec):
+                resume, vec_norm = w_model, w_vec
+                print(f"Resuming curriculum run {run_id} from completed warmup -> stage 1")
+        if not resume and resume_path:
             print(f"Curriculum run {run_id}: no completed stages found, using --resume checkpoint")
-        else:
+        elif not resume:
             print(f"Curriculum run {run_id}: starting from scratch")
     elif resume_path and not os.path.isfile(_zip_path(resume_path)):
         print(f"Warning: resume checkpoint not found: {resume_path}")
@@ -539,9 +613,10 @@ def train_curriculum(
     if not no_stage_gate:
         print(f"  stage gate: {stage_gate_win_rate:.0%} win rate over {stage_gate_episodes} eval games")
         if stage_gate_extra_steps:
-            print(f"  gate retry: +{stage_gate_extra_steps} timesteps per failed stage")
+            print(f"  gate retry: +{stage_gate_extra_steps} timesteps per failed gate")
     if warmup_opponent and warmup_timesteps > 0 and not resume and not curriculum_run_id:
-        print(f"  warmup: {warmup_timesteps} steps vs {warmup_opponent} before minimax curriculum")
+        gate_note = f", {stage_gate_win_rate:.0%} win gate" if not no_stage_gate else ""
+        print(f"  warmup: {warmup_timesteps} steps vs {warmup_opponent}{gate_note}")
     print()
 
     if warmup_opponent and warmup_timesteps > 0 and not resume and not curriculum_run_id:
@@ -549,23 +624,63 @@ def train_curriculum(
         print(f"Warmup: {warmup_opponent} opponent, {warmup_timesteps} timesteps")
         print(f"{'=' * 60}\n")
         w_n_envs = n_envs or default_n_envs(mp.cpu_count(), warmup_opponent, None, max_envs)
-        model, final_path, vec_path = train(
-            total_timesteps=warmup_timesteps,
-            save_dir=save_dir,
-            eval_freq=eval_freq,
-            opponent_type=warmup_opponent,
-            n_envs=w_n_envs,
-            max_envs=max_envs,
-            early_stop=False,
-            run_id=run_id,
-            stage_label="_warmup",
-            **train_kw,
-        )
-        resume = final_path
-        vec_norm = vec_path
-        last_model_path = final_path
-        last_vec_path = vec_path
-        gc.collect()
+        w_steps = warmup_timesteps
+        w_resume = None
+        w_vec = None
+        passed = False
+        while not passed:
+            model, final_path, vec_path = train(
+                total_timesteps=w_steps,
+                save_dir=save_dir,
+                eval_freq=eval_freq,
+                opponent_type=warmup_opponent,
+                n_envs=w_n_envs,
+                max_envs=max_envs,
+                resume_path=w_resume,
+                vec_normalize_path=w_vec,
+                early_stop=False,
+                run_id=run_id,
+                stage_label="_warmup",
+                **train_kw,
+            )
+            if no_stage_gate:
+                passed = True
+            else:
+                stats = evaluate_vs_opponent(
+                    model, vec_path, warmup_opponent,
+                    n_episodes=stage_gate_episodes,
+                )
+                print(
+                    f"\nWarmup gate ({warmup_opponent}): "
+                    f"{stats['wins']}W {stats['losses']}L {stats['draws']}D / {stage_gate_episodes} "
+                    f"win_rate={stats['win_rate']:.1%} mean_reward={stats['mean_reward']:.2f} "
+                    f"mean_length={stats['mean_length']:.1f}"
+                )
+                if stats["win_rate"] >= stage_gate_win_rate:
+                    passed = True
+                elif stage_gate_extra_steps > 0:
+                    print(
+                        f"Warmup gate not met ({stats['win_rate']:.1%} < {stage_gate_win_rate:.0%}), "
+                        f"training {stage_gate_extra_steps} more timesteps vs {warmup_opponent}..."
+                    )
+                    w_resume = final_path
+                    w_vec = vec_path
+                    w_steps = stage_gate_extra_steps
+                else:
+                    print(
+                        f"\nWarmup stopped: did not reach {stage_gate_win_rate:.0%} win rate "
+                        f"vs {warmup_opponent}."
+                    )
+                    print(f"Checkpoint: {final_path}")
+                    print(f"VecNormalize: {vec_path}")
+                    model = PPO.load(_zip_path(final_path))
+                    return model, final_path, vec_path
+            resume = final_path
+            vec_norm = vec_path
+            last_model_path = final_path
+            last_vec_path = vec_path
+            del model
+            gc.collect()
         print(f"Warmup finished -> {final_path}\n")
 
     for i, (depth, steps) in enumerate(stages, 1):
@@ -651,15 +766,17 @@ def train_curriculum(
             vec_norm = vec_path
             last_model_path = final_path
             last_vec_path = vec_path
+            del model
             gc.collect()
             print(f"Stage {i}/{len(stages)} finished -> {final_path}")
 
     curriculum_final = os.path.join(save_dir, f"tron_ppo_curriculum_final_{run_id}")
-    model.save(curriculum_final)
+    shutil.copy2(_zip_path(last_model_path), _zip_path(curriculum_final))
     shutil.copy2(
         last_vec_path,
         os.path.join(save_dir, f"vec_normalize_curriculum_final_{run_id}.pkl"),
     )
+    model = PPO.load(_zip_path(last_model_path))
     print(f"\nCurriculum complete! Final model: {curriculum_final}.zip")
     print(f"VecNormalize: vec_normalize_curriculum_final_{run_id}.pkl")
     return model, curriculum_final, last_vec_path
@@ -669,7 +786,7 @@ def main():
     parser = argparse.ArgumentParser(description="Train PPO on Tron environment")
     parser.add_argument("--timesteps", type=int, default=None, help="Total timesteps (curriculum default: 500000)")
     parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate")
-    parser.add_argument("--n-steps", type=int, default=2048, help="Steps per rollout")
+    parser.add_argument("--n-steps", type=int, default=512, help="Steps per rollout")
     parser.add_argument("--batch-size", type=int, default=64, help="Minibatch size")
     parser.add_argument("--epochs", type=int, default=10, help="Number of epochs")
     parser.add_argument("--gamma", type=float, default=0.99, help="Discount factor")
@@ -706,15 +823,15 @@ def main():
                        help="Min win rate vs current depth to advance curriculum (default 0.25)")
     parser.add_argument("--stage-gate-episodes", type=int, default=20,
                        help="Eval games for stage gate (default 20)")
-    parser.add_argument("--stage-gate-extra-steps", type=int, default=0,
-                       help="Extra timesteps on same stage if gate fails (0=stop)")
+    parser.add_argument("--stage-gate-extra-steps", type=int, default=100000,
+                       help="Extra timesteps on same stage if 25%% gate fails (default 100000, 0=stop)")
     parser.add_argument("--no-stage-gate", action="store_true",
                        help="Advance curriculum regardless of win rate")
     parser.add_argument("--warmup-opponent", type=str, default="heuristic",
                        choices=["random", "heuristic", "lookahead"],
                        help="Opponent for warmup phase before minimax curriculum")
-    parser.add_argument("--warmup-timesteps", type=int, default=50000,
-                       help="Warmup timesteps before minimax (0=skip)")
+    parser.add_argument("--warmup-timesteps", type=int, default=200000,
+                       help="Heuristic warmup timesteps before minimax (default 200000)")
     parser.add_argument("--no-warmup", action="store_true", help="Skip heuristic warmup")
     
     args = parser.parse_args()

@@ -31,13 +31,14 @@ class GridFrameStackWrapper(gym.Wrapper):
             "valid": valid.astype(np.float32),
         }
 
+    def _valid(self) -> np.ndarray:
+        return self.env.unwrapped.valid_actions().astype(np.float32)
+
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
         self.frames = []
-        valid = self.env.valid_actions().astype(np.float32)
-        return self._stack(obs, valid), info
+        return self._stack(obs, self._valid()), info
 
     def step(self, action):
         obs, reward, terminated, truncated, info = self.env.step(action)
-        valid = self.env.valid_actions().astype(np.float32)
-        return self._stack(obs, valid), reward, terminated, truncated, info
+        return self._stack(obs, self._valid()), reward, terminated, truncated, info

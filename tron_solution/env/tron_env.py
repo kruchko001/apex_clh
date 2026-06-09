@@ -9,8 +9,8 @@ Action Space: Discrete(4)
   - 2: DOWN
   - 3: LEFT
 
-Training reward (aggressive):
-  - Per-step: -0.01 | Clean kill: +10 | Die: -10
+Training reward:
+  - Per-step: -0.01 + space shaping | Win: +15 | Loss: -10 | Draw: -8
   - info["official_score"] still uses competition cascade for eval
 """
 
@@ -43,8 +43,11 @@ class TronEnv(gym.Env):
     OPPOSITE = {UP: DOWN, DOWN: UP, LEFT: RIGHT, RIGHT: LEFT}
 
     STEP_REWARD = -0.01
-    WIN_REWARD = 10.0
+    WIN_REWARD = 15.0
     LOSS_REWARD = -10.0
+    DRAW_REWARD = -8.0
+    SPACE_COEF = 0.02
+    SPACE_NORM = PLAY_SIZE * PLAY_SIZE
     
     # Direction vectors
     DIRECTIONS = {
@@ -224,7 +227,9 @@ class TronEnv(gym.Env):
             self.opponent_head = new_opponent_head
             self.my_trail[self.my_head] = True
             self.opponent_trail[self.opponent_head] = True
-            reward = self.STEP_REWARD
+            my_space = self._count_space(self.my_head)
+            opp_space = self._count_space(self.opponent_head)
+            reward = self.STEP_REWARD + self.SPACE_COEF * (my_space - opp_space) / self.SPACE_NORM
             if self.step_count >= self.max_steps:
                 truncated = True
                 info["timeout"] = True
@@ -241,7 +246,7 @@ class TronEnv(gym.Env):
                 reward = self.LOSS_REWARD * 0.5
                 info["official_score"] = 0.10
             else:
-                reward = self.LOSS_REWARD * 0.4
+                reward = self.DRAW_REWARD
                 info["official_score"] = 0.40
         elif my_collision:
             terminated = True
@@ -295,6 +300,25 @@ class TronEnv(gym.Env):
         if action != self.OPPOSITE[self.opponent_direction]:
             self.opponent_direction = action
     
+    def _count_space(self, start: Tuple[int, int]) -> int:
+        grid = self._get_grid()
+        h, w = grid.shape
+        visited = set()
+        stack = [start]
+        count = 0
+        while stack and count < 2000:
+            pos = stack.pop()
+            if pos in visited:
+                continue
+            visited.add(pos)
+            count += 1
+            r, c = pos
+            for dr, dc in self.DIRECTIONS.values():
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < h and 0 <= nc < w and grid[nr, nc] == 0 and (nr, nc) not in visited:
+                    stack.append((nr, nc))
+        return count
+
     def _get_grid(self) -> np.ndarray:
         """Get internal grid representation for opponent AI.
         

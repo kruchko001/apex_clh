@@ -247,11 +247,11 @@ def find_vec_normalize(model_path, save_dir="./ppo_tron_checkpoints"):
 
 
 def make_sb3_env(minimax_depth, render_mode):
-    return GridFrameStackWrapper(Monitor(TronEnv(
+    return Monitor(GridFrameStackWrapper(TronEnv(
         grid_size=32, max_steps=500, render_mode=render_mode,
         opponent_type="minimax", minimax_depth=minimax_depth,
         render_my_label="MODEL", render_opp_label="AI",
-    )), n_stack=N_STACK)
+    ), n_stack=N_STACK))
 
 
 def load_sb3_duel_env(model_path, vec_path, minimax_depth, render_mode="human"):

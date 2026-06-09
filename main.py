@@ -38,10 +38,10 @@ def main():
     train_parser.add_argument("--stage-gate-win-rate", type=float, default=0.25,
                               help="Min win rate vs current depth to advance (default 0.25)")
     train_parser.add_argument("--stage-gate-episodes", type=int, default=20)
-    train_parser.add_argument("--stage-gate-extra-steps", type=int, default=0,
-                              help="Extra timesteps on same stage if gate fails (0=stop)")
+    train_parser.add_argument("--stage-gate-extra-steps", type=int, default=100000,
+                              help="Extra timesteps on same stage if 25%% gate fails (default 100000, 0=stop)")
     train_parser.add_argument("--no-stage-gate", action="store_true")
-    train_parser.add_argument("--warmup-timesteps", type=int, default=50000)
+    train_parser.add_argument("--warmup-timesteps", type=int, default=200000)
     train_parser.add_argument("--no-warmup", action="store_true")
     train_parser.add_argument("--no-early-stop", action="store_true")
     train_parser.add_argument("--early-stop-patience", type=int, default=6)

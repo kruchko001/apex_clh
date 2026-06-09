@@ -49,3 +49,4 @@ ppo_tron_checkpoints/
 *.pkl
 tron_solution/*.jsonl
 tron_solution/_tb_map.txt
+tronbot/
