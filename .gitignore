@@ -45,6 +45,8 @@ Thumbs.db
 
 # Training artifacts
 ppo_tron_checkpoints/
+tron_paper_checkpoints/
+tron_paper_checkpoints_test/
 *.pt
 *.pkl
 tron_solution/*.jsonl

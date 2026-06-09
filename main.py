@@ -87,6 +87,26 @@ def main():
     serve_parser.add_argument("--host", type=str, default="0.0.0.0")
     serve_parser.add_argument("--server-stack", action="store_true",
                               help="Stack frames server-side for raw 20-channel core models")
+
+    paper_parser = subparsers.add_parser("train-paper", help="Train MRL paper agent (stationary + non-stationary PPO)")
+    paper_parser.add_argument("--stationary-steps", type=int, default=300000)
+    paper_parser.add_argument("--non-stationary-steps", type=int, default=500000)
+    paper_parser.add_argument("--save-dir", type=str, default="./tron_paper_checkpoints")
+    paper_parser.add_argument("--n-envs", type=int, default=4)
+    paper_parser.add_argument("--lr", type=float, default=3e-4)
+    paper_parser.add_argument("--stage", choices=["all", "stationary", "non-stationary"], default="all")
+    paper_parser.add_argument("--stationary-weights", type=str, default=None)
+
+    paper_export = subparsers.add_parser("export-paper", help="Export MRL cursor model to TorchScript")
+    paper_export.add_argument("--non-stationary", type=str, default="./tron_paper_checkpoints/non_stationary_agent.pt")
+    paper_export.add_argument("--stationary", type=str, default="./tron_paper_checkpoints/stationary_agent.pt")
+    paper_export.add_argument("--output", type=str, default="tron_model.pt")
+
+    paper_test = subparsers.add_parser("test-paper", help="Test MRL .pt with official launcher encode/mask flow")
+    paper_test.add_argument("--model_path", type=str, default="tron_model.pt")
+    paper_test.add_argument("--episodes", type=int, default=5)
+    paper_test.add_argument("--seed", type=int, default=0)
+    paper_test.add_argument("--grid", type=int, default=32)
     
     args = parser.parse_args()
     
@@ -162,6 +182,24 @@ def main():
         import uvicorn
         uvicorn.run(make_app(args.model, args.server_stack), host=args.host, port=args.port)
     
+    elif args.command == "train-paper":
+        from tron_paper.training.train_stationary import train_stationary
+        from tron_paper.training.train_non_stationary import train_non_stationary, train_all
+        if args.stage == "all":
+            train_all(args.stationary_steps, args.non_stationary_steps, args.save_dir, args.n_envs, args.lr)
+        elif args.stage == "stationary":
+            train_stationary(args.stationary_steps, args.save_dir, args.n_envs, args.lr)
+        else:
+            train_non_stationary(args.non_stationary_steps, args.save_dir, args.stationary_weights, args.lr)
+
+    elif args.command == "export-paper":
+        from tron_paper.export.export_model import export_mrl
+        export_mrl(args.non_stationary, args.stationary, args.output)
+
+    elif args.command == "test-paper":
+        from tron_paper.test.test_model import test_paper_model
+        test_paper_model(args.model_path, args.episodes, args.seed, args.grid)
+
     elif args.command == "watch":
         from tron_solution.watch_duel import run_sb3_duel, run_pt_duel, find_vec_normalize
         if args.model_path.endswith(".pt"):
