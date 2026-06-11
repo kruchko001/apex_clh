@@ -21,6 +21,7 @@ while True:
 from tron_solution.env.tron_env import TronEnv
 from tron_solution.env.opponents import MinimaxOpponent, PLAY_MINIMAX_DEPTHS
 from tron_solution.env.tronbot_player import TronBotPlayer, default_tronbot_path
+from duel_utils import opening_cross_tronenv
 
 LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "watch_tronbot_duel.log")
 JSONL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tronbot_duel.jsonl")
@@ -121,7 +122,7 @@ def _log_move(jf, duel, seed, step, env, minimax, mm_act, tb_act, tronbot_side):
 def run_tronbot_duel(
     tronbot_path=None,
     minimax_depth=14,
-    episodes=5,
+    episodes=3,
     delay_ms=80,
     headless=False,
     tronbot_side="my",
@@ -176,8 +177,8 @@ def run_tronbot_duel(
             for ep in range(episodes):
                 tronbot.start()
                 obs, _ = env.reset(seed=ep)
+                steps = 1 if opening_cross_tronenv(env) else 0
                 done = False
-                steps = 0
 
                 while not done:
                     if render and _poll_quit():
@@ -248,7 +249,7 @@ def main():
     p = argparse.ArgumentParser(description="Watch TronBot (SOTA) vs MinimaxOpponent")
     p.add_argument("--tronbot-path", type=str, default=None)
     p.add_argument("--minimax-depth", type=int, default=PLAY_MINIMAX_DEPTHS["hard"])
-    p.add_argument("--episodes", type=int, default=5)
+    p.add_argument("--runs", "--episodes", type=int, default=3, dest="episodes")
     p.add_argument("--delay-ms", type=int, default=80)
     p.add_argument("--headless", action="store_true")
     p.add_argument("--tronbot-side", choices=["my", "opp"], default="my")

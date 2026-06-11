@@ -35,12 +35,8 @@ def train_non_stationary(
         m = model_ref["ppo"]
         if m is None:
             return int(np.random.randint(0, 4))
-        with th.no_grad():
-            t = th.as_tensor(obs, dtype=th.float32).unsqueeze(0)
-            feat = m.policy.extract_features(t, m.policy.pi_features_extractor)
-            latent = m.policy.mlp_extractor.forward_actor(feat)
-            logits = m.policy.action_net(latent)
-            return int(logits.argmax(dim=-1).item())
+        action, _ = m.predict(obs, deterministic=True)
+        return int(action)
 
     env.set_opponent_fn(opponent_fn)
     vec = DummyVecEnv([lambda: Monitor(env)])
@@ -62,7 +58,7 @@ def train_non_stationary(
     model.learn(total_timesteps=total_timesteps, progress_bar=False, tb_log_name=f"non_stationary_{ts}")
 
     sb3_path = os.path.join(save_dir, f"non_stationary_{ts}")
-    model.save(sb3_path)
+    model.save(sb3_path, exclude=["env"])
     ac = _sb3_to_ac(model, stationary=False)
     pt_path = os.path.join(save_dir, "non_stationary_agent.pt")
     th.save(ac.state_dict(), pt_path)
@@ -77,9 +73,18 @@ def train_all(
     save_dir: str = "./tron_paper_checkpoints",
     n_envs: int = 4,
     learning_rate: float = 3e-4,
+    ent_coef: float = 0.02,
+    checkpoint_freq: int = 50_000,
     verbose: int = 1,
+    show_gui: bool = False,
+    gui_delay_ms: int = 50,
+    gui_every_updates: int = 1,
 ):
     from tron_paper.training.train_stationary import train_stationary
 
-    _, stationary_pt = train_stationary(stationary_steps, save_dir, n_envs, learning_rate, verbose)
+    _, stationary_pt = train_stationary(
+        stationary_steps, save_dir, n_envs, learning_rate,
+        ent_coef=ent_coef, checkpoint_freq=checkpoint_freq, verbose=verbose,
+        show_gui=show_gui, gui_delay_ms=gui_delay_ms, gui_every_updates=gui_every_updates,
+    )
     train_non_stationary(non_stationary_steps, save_dir, stationary_pt, learning_rate, verbose)

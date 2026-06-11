@@ -442,10 +442,8 @@ class TronEnv(gym.Env):
             cy = pos[0] * cs + cs // 2
             self.window.blit(surf, surf.get_rect(center=(cx, cy)))
 
-        if self.render_my_label:
-            head_label(self.my_head, self.render_my_label)
-        if self.render_opp_label:
-            head_label(self.opponent_head, self.render_opp_label)
+        head_label(self.my_head, self.render_my_label or "MY")
+        head_label(self.opponent_head, self.render_opp_label or "OPP")
 
         status = f"Step {self.step_count}"
         if self.render_my_label and self.render_opp_label:

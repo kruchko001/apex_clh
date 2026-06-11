@@ -4,3 +4,4 @@ stable-baselines3
 numpy
 pydantic
 requests
+pygame

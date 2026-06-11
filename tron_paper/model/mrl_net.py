@@ -2,7 +2,14 @@ import torch
 import torch.nn as nn
 
 from tron_paper.model.mish import Mish
-from tron_paper.env.encode import CHANNELS, GRID
+from tron_paper.model.phase_torch import (
+    compute_action_mask,
+    extract_non_stationary_input,
+    extract_stationary_input,
+)
+
+_MASK_FILL = -1e8
+from tron_paper.env.encode import CHANNELS, PLAY_SIZE, STATIONARY_CHANNELS
 
 
 class ResBlock(nn.Module):
@@ -16,7 +23,7 @@ class ResBlock(nn.Module):
 
 
 class MRLTrunk(nn.Module):
-    def __init__(self, in_ch: int = CHANNELS, spatial: int = GRID):
+    def __init__(self, in_ch: int = CHANNELS, spatial: int = PLAY_SIZE):
         super().__init__()
         self.act = Mish()
         self.c1 = nn.Conv2d(in_ch, 32, 3, padding=1)
@@ -54,10 +61,13 @@ class MRLTrunk(nn.Module):
 
 
 class MRLActorCritic(nn.Module):
-    def __init__(self, stationary: bool = False, spatial: int = GRID):
+    def __init__(self, stationary: bool = False, spatial: int = None):
         super().__init__()
         self.stationary = stationary
-        self.trunk = MRLTrunk(spatial=spatial)
+        in_ch = STATIONARY_CHANNELS if stationary else CHANNELS
+        if spatial is None:
+            spatial = PLAY_SIZE
+        self.trunk = MRLTrunk(in_ch=in_ch, spatial=spatial)
         self.act = Mish()
         self.pi1 = nn.Linear(128, 64)
         self.pi2 = nn.Linear(64, 4)
@@ -65,22 +75,23 @@ class MRLActorCritic(nn.Module):
         self.v2 = nn.Linear(64, 16)
         self.v3 = nn.Linear(16, 1)
 
-    def _mask(self, x):
-        if not self.stationary:
-            return x
-        y = x.clone()
-        y[:, 2] = 0.0
-        y[:, 4] = 0.0
-        return y
+    def _prep(self, x):
+        if self.stationary:
+            return extract_stationary_input(x)
+        return extract_non_stationary_input(x)
 
-    def trunk_features(self, x):
-        return self.trunk(self._mask(x))
+    def _masked_logits(self, x, logits):
+        mask = compute_action_mask(x, self.stationary)
+        return logits.masked_fill(~mask, -1e8)
 
     def forward(self, x):
-        h = self.trunk_features(x)
-        logits = self.pi2(self.act(self.pi1(h)))
+        h = self.trunk(self._prep(x))
+        logits = self._masked_logits(x, self.pi2(self.act(self.pi1(h))))
         v = self.v3(self.act(self.v2(self.act(self.v1(h)))))
         return logits, v.squeeze(-1)
+
+    def trunk_features(self, x):
+        return self.trunk(self._prep(x))
 
     def act_greedy(self, obs):
         with torch.no_grad():

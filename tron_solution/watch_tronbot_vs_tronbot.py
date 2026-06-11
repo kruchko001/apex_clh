@@ -20,6 +20,7 @@ while True:
 
 from tron_solution.env.tron_env import TronEnv
 from tron_solution.env.tronbot_player import TronBotPlayer, default_tronbot_path
+from duel_utils import opening_cross_tronenv
 
 LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "watch_tronbot_vs_tronbot.log")
 JSONL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tronbot_vs_tronbot.jsonl")
@@ -71,7 +72,7 @@ def _outcome(info):
 
 def run_tronbot_vs_tronbot(
     tronbot_path=None,
-    episodes=5,
+    episodes=3,
     delay_ms=80,
     headless=False,
     move_timeout=5.0,
@@ -109,8 +110,8 @@ def run_tronbot_vs_tronbot(
         with open(jsonl_path, "w") as jf:
             for ep in range(episodes):
                 obs, _ = env.reset(seed=ep)
+                steps = 1 if opening_cross_tronenv(env) else 0
                 done = False
-                steps = 0
                 while not done:
                     if render and _poll_quit():
                         return
@@ -181,7 +182,7 @@ def run_tronbot_vs_tronbot(
 def main():
     p = argparse.ArgumentParser(description="Watch TronBot vs TronBot")
     p.add_argument("--tronbot-path", type=str, default=None)
-    p.add_argument("--episodes", type=int, default=5)
+    p.add_argument("--runs", "--episodes", type=int, default=3, dest="episodes")
     p.add_argument("--delay-ms", type=int, default=80)
     p.add_argument("--headless", action="store_true")
     p.add_argument("--move-timeout", type=float, default=5.0)

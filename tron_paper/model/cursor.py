@@ -17,7 +17,6 @@ class MRLCursor(nn.Module):
         sep = phase_separated(obs)
         ns_logits, _ = self.non_stationary(obs)
         st_obs = obs.clone()
-        st_obs[:, 2] = 0.0
         st_obs[:, 4] = 0.0
         s_logits, _ = self.stationary(st_obs)
         logits = s_logits * sep + ns_logits * (1.0 - sep)

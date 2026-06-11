@@ -29,6 +29,7 @@ from tron_solution.env.opponents import PLAY_MINIMAX_DEPTHS
 from tron_solution.env.frame_stack_wrapper import GridFrameStackWrapper
 from tron_solution.model.obs import N_STACK, to_sandbox_obs_np, valid_mask_from_actions
 from tron_solution.model.frame_stack import FrameStack
+from duel_utils import opening_cross_tronenv, DEFAULT_DUEL_RUNS
 
 LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "watch_duel.log")
 DIR_NAMES = ["UP", "RIGHT", "DOWN", "LEFT"]
@@ -271,8 +272,8 @@ def _run_sb3_episodes(model, venv, tron, episodes, delay_ms, render, logger, wai
     for ep in range(episodes):
         logger.start_duel(ep + 1)
         obs = venv.reset()
+        steps = 1 if opening_cross_tronenv(_get_tron_from_venv(venv)) else 0
         done = False
-        steps = 0
         total_r = 0.0
         info = {}
 
@@ -375,10 +376,12 @@ def run_pt_duel(model_path, minimax_depth, episodes, delay_ms, headless=False):
     for ep in range(episodes):
         logger.start_duel(ep + 1)
         obs, _ = env.reset(seed=ep)
+        steps = 1 if opening_cross_tronenv(env) else 0
         if raw_core:
-            stacked = stack.reset(obs)
+            stacked = stack.reset(env._get_observation())
+        elif wrapped:
+            obs = env._get_observation()
         done = False
-        steps = 0
         total_r = 0.0
         info = {}
 
@@ -433,7 +436,7 @@ def main():
     p.add_argument("--model_path", type=str, default="./ppo_tron_checkpoints/best_model.zip")
     p.add_argument("--vec_normalize", type=str, default=None)
     p.add_argument("--minimax-depth", type=int, default=PLAY_MINIMAX_DEPTHS["hard"])
-    p.add_argument("--episodes", type=int, default=5)
+    p.add_argument("--runs", "--episodes", type=int, default=DEFAULT_DUEL_RUNS, dest="episodes")
     p.add_argument("--delay-ms", type=int, default=80, help="Ms between steps (0=fast)")
     p.add_argument("--headless", action="store_true", help="No window; log and analyze only")
     args = p.parse_args()

@@ -20,7 +20,10 @@ import numpy as np
 from competition.tron.tron import TronGame, PLAYER_TRAIL_START, WALL
 
 GRID = 32
+PLAY_SIZE = 30
+MARGIN = 1
 CHANNELS = 5
+STATIONARY_CHANNELS = 2
 
 
 def encode_official(game: TronGame, player_id: int) -> np.ndarray:
@@ -49,7 +52,13 @@ def encode_non_stationary(game: TronGame, player_id: int) -> np.ndarray:
 
 def encode_stationary(game: TronGame, player_id: int) -> np.ndarray:
     obs = encode_official(game, player_id)
-    obs[2] = 0.0
+    grid = game.grid
+    h, w = grid.shape
+    border = np.zeros((h, w), dtype=bool)
+    border[0, :] = border[-1, :] = border[:, 0] = border[:, -1] = True
+    is_wall = grid == WALL
+    obs[0] = border.astype(np.float32)
+    obs[2] = np.clip((is_wall & ~border).astype(np.float32), 0.0, 1.0)
     obs[4] = 0.0
     return obs
 

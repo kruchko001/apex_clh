@@ -37,25 +37,25 @@ def valid_mask_from_grid(grid: torch.Tensor) -> torch.Tensor:
     nc0 = c1
     ok0 = (nr0 >= 0) & (nr0 < h) & (nc0 >= 0) & (nc0 < w)
     ok0 = ok0 & (cur != 2)
-    ok0 = ok0 & (blocked[ar, nr0, nc0] < 0.5)
+    ok0 = ok0 & (blocked[ar, nr0.clamp(0, h - 1), nc0.clamp(0, w - 1)] < 0.5)
 
     nr1 = r1
     nc1 = c1 + 1
     ok1 = (nr1 >= 0) & (nr1 < h) & (nc1 >= 0) & (nc1 < w)
     ok1 = ok1 & (cur != 3)
-    ok1 = ok1 & (blocked[ar, nr1, nc1] < 0.5)
+    ok1 = ok1 & (blocked[ar, nr1.clamp(0, h - 1), nc1.clamp(0, w - 1)] < 0.5)
 
     nr2 = r1 + 1
     nc2 = c1
     ok2 = (nr2 >= 0) & (nr2 < h) & (nc2 >= 0) & (nc2 < w)
     ok2 = ok2 & (cur != 0)
-    ok2 = ok2 & (blocked[ar, nr2, nc2] < 0.5)
+    ok2 = ok2 & (blocked[ar, nr2.clamp(0, h - 1), nc2.clamp(0, w - 1)] < 0.5)
 
     nr3 = r1
     nc3 = c1 - 1
     ok3 = (nr3 >= 0) & (nr3 < h) & (nc3 >= 0) & (nc3 < w)
     ok3 = ok3 & (cur != 1)
-    ok3 = ok3 & (blocked[ar, nr3, nc3] < 0.5)
+    ok3 = ok3 & (blocked[ar, nr3.clamp(0, h - 1), nc3.clamp(0, w - 1)] < 0.5)
 
     mask = torch.stack([ok0.float(), ok1.float(), ok2.float(), ok3.float()], dim=1)
     none_ok = mask.sum(dim=1) < 0.5

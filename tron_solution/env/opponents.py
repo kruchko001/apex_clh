@@ -6,7 +6,7 @@ They are NOT subject to the 0.05s inference constraint.
 
 import numpy as np
 from typing import Tuple, List, Optional
-from .tronbot_engine import TronBotEngine
+from tronbot.python import MyTronBot, TIMEOUT_SEC, FIRST_MOVE_TIMEOUT_SEC
 
 DEFAULT_OPPONENT_TYPE = "minimax"
 DEFAULT_MINIMAX_DEPTH = 14
@@ -710,14 +710,18 @@ class MinimaxOpponent(BaseOpponent):
 
 
 class TronBotOpponent(BaseOpponent):
-    def __init__(self, move_timeout=0.05, first_move_timeout=0.15):
-        self.engine = TronBotEngine(move_timeout, first_move_timeout)
+    def __init__(
+        self,
+        move_timeout=TIMEOUT_SEC,
+        first_move_timeout=FIRST_MOVE_TIMEOUT_SEC,
+    ):
+        self.bot = MyTronBot(move_timeout, first_move_timeout)
 
     def reset(self):
-        self.engine.reset()
+        self.bot.reset()
 
     def _choose_action(self, obs, my_head, opp_head, grid, current_dir=None, my_dir=None):
-        action = self.engine.choose_move(grid, opp_head, my_head)
+        action = self.bot.choose_move(grid, my_head, opp_head)
         valid = self._get_valid_moves(opp_head, grid, current_dir)
         if valid:
             if action not in valid:
@@ -745,6 +749,6 @@ def get_opponent(opponent_type: str = None, minimax_depth: int = None, tronbot_t
         depth = minimax_depth if minimax_depth is not None else DEFAULT_MINIMAX_DEPTH
         return MinimaxOpponent(depth=depth)
     if opponent_type == 'tronbot':
-        timeout = tronbot_timeout if tronbot_timeout is not None else 0.05
+        timeout = tronbot_timeout if tronbot_timeout is not None else TIMEOUT_SEC
         return TronBotOpponent(move_timeout=timeout, first_move_timeout=timeout * 3)
     return opponents[opponent_type]()

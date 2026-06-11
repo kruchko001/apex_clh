@@ -1,5 +1,7 @@
 import os
+import queue
 import subprocess
+import threading
 from typing import Optional
 
 TRONBOT_TO_ACTION = {1: 0, 2: 1, 3: 2, 4: 3}
@@ -110,3 +112,108 @@ class TronBotPlayer:
 
     def close(self):
         pass
+
+
+class PersistentTronBotPlayer:
+    def __init__(self, bot_path: str = None, as_player: int = 0, move_timeout: float = 5.0, use_timer: bool = True):
+        self.bot_path = bot_path or default_tronbot_path()
+        self.as_player = as_player
+        self.move_timeout = move_timeout
+        self.use_timer = use_timer
+        self.proc = None
+        self._warned = False
+
+    def start(self):
+        if not os.path.isfile(self.bot_path):
+            raise FileNotFoundError(
+                f"TronBot binary not found at {self.bot_path}. "
+                f"Run: powershell -File tronbot/cpp/build.ps1 -Fast"
+            )
+        self._spawn()
+
+    def _spawn(self):
+        self.close()
+        no_timer = "0" if self.use_timer else "1"
+        self.proc = subprocess.Popen(
+            [self.bot_path, str(self.as_player), no_timer],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+
+    def _readline(self, timeout: float) -> Optional[str]:
+        q = queue.Queue()
+
+        def read():
+            try:
+                q.put(self.proc.stdout.readline())
+            except Exception:
+                q.put("")
+
+        t = threading.Thread(target=read, daemon=True)
+        t.start()
+        try:
+            return q.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
+    def _fallback_action(self, tron_env) -> int:
+        if self.as_player == 0:
+            head, direction = tron_env.my_head, tron_env.current_direction
+            trail, other = tron_env.my_trail, tron_env.opponent_trail
+        else:
+            head, direction = tron_env.opponent_head, tron_env.opponent_direction
+            trail, other = tron_env.opponent_trail, tron_env.my_trail
+        reverse = tron_env.OPPOSITE[direction]
+        for action in (direction, (direction + 1) % 4, (direction + 3) % 4, reverse):
+            if action == reverse:
+                continue
+            dr, dc = tron_env.DIRECTIONS[action]
+            r, c = head[0] + dr, head[1] + dc
+            if r < 0 or r >= tron_env.grid_size or c < 0 or c >= tron_env.grid_size:
+                continue
+            if tron_env.walls[r, c] or trail[r, c] or other[r, c]:
+                continue
+            return action
+        return direction
+
+    def get_action(self, tron_env) -> int:
+        if self.proc is None or self.proc.poll() is not None:
+            self.start()
+        payload = encode_tronbot_map(tron_env, self.as_player)
+        try:
+            self.proc.stdin.write(payload)
+            self.proc.stdin.flush()
+        except (BrokenPipeError, OSError, ValueError):
+            self._spawn()
+            try:
+                self.proc.stdin.write(payload)
+                self.proc.stdin.flush()
+            except (BrokenPipeError, OSError, ValueError):
+                return self._fallback_action(tron_env)
+        line = self._readline(self.move_timeout + 2.0)
+        if not line or not line.strip():
+            self._spawn()
+            return self._fallback_action(tron_env)
+        try:
+            move = int(line.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            return self._fallback_action(tron_env)
+        if move not in TRONBOT_TO_ACTION:
+            return self._fallback_action(tron_env)
+        return TRONBOT_TO_ACTION[move]
+
+    def close(self):
+        if self.proc is not None:
+            try:
+                self.proc.stdin.close()
+            except Exception:
+                pass
+            try:
+                self.proc.kill()
+                self.proc.communicate(timeout=1)
+            except Exception:
+                pass
+            self.proc = None
